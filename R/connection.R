@@ -1,4 +1,8 @@
 
+# Credentials live here, keyed per connection, rather than inside the connection
+# object, so they don't leak through print(), str(), saveRDS() or saved workspaces.
+.credentials <- new.env(parent = emptyenv())
+
 #' Create EMS Connection Object
 #'
 #' \code{connect} Creates a connection object to an EMS server for use in FltQuery objects.
@@ -9,11 +13,21 @@
 #' securely, or wrap this function in something like \code{rstudioapi::askForPassword()} to avoid disclosing
 #' your credentials.
 #'
+#' The password is held in memory for the current R session only (so the token can be refreshed when it
+#' expires); it is not stored in the returned object. A connection object restored from disk in a new
+#' session therefore cannot reconnect - call \code{connect} again.
+#'
+#' TLS certificates are always verified. If you are behind a proxy that re-signs traffic with a corporate
+#' certificate, pass that CA bundle via \code{cainfo} (or set the \code{CURL_CA_BUNDLE} environment variable).
+#'
 #' @param usr A string, FOQA username (like firstname.lastname)
 #' @param pwd A string, FOQA password
 #' @param proxies A list containing the system proxy information, with attributes "url", "port", "usr", "pwd"
 #' @param server A string. Lets you choose an API server. Should be one of 'prod', 'cluster', 'stable', 'beta', 'nightly', or 'ctc'.
 #' @param server_url An optional string. If this is passed, it will be used instead of the internal server definitions matched by the 'server' argument.
+#' @param cainfo An optional path to a CA certificate bundle (PEM) used to verify the server certificate.
+#' @param stall_timeout Seconds a request may go without receiving any data before it is aborted
+#'   (and retried, for GET/DELETE). Without this a dropped connection can hang forever.
 #' @return a Connection object to be used in FltQuery.
 #'
 #' @examples
@@ -31,58 +45,118 @@
 #'}
 #'
 #' @export
-connect <- function(usr, pwd, proxies = NULL, server = c('prod', 'cluster', 'stable', 'beta', 'nightly', 'ctc'), server_url = NULL)
+connect <- function(usr, pwd, proxies = NULL, server = c('prod', 'cluster', 'stable', 'beta', 'nightly', 'ctc'), server_url = NULL, cainfo = NULL, stall_timeout = 300)
   {
-    # Prevent from the Peer certificate error ("Error in curl::curl_fetch_memory(url, handle = handle) :
-    # Peer certificate cannot be authenticated with given CA certificates")
-    httr::set_config( config( ssl_verifypeer = 0 ) )
+    server <- match.arg(server, c('prod', 'cluster', 'stable', 'beta', 'nightly', 'ctc'), several.ok = FALSE)
+    sel_uri_root <- if (is.null(server_url)) uri_root[[server]] else server_url
 
+    cred_key <- basename(tempfile("conn"))
+    assign(cred_key, list(usr = usr, pwd = pwd, proxies = proxies), envir = .credentials)
+
+    conn <- list(
+      proxies   = proxies[setdiff(names(proxies), c("usr", "pwd"))],
+      uri_root  = sel_uri_root,
+      cainfo    = cainfo,
+      stall_timeout = stall_timeout,
+      cred_key  = cred_key,
+      # The token sits in an environment so a refresh is seen by every copy of
+      # the connection (each query object holds its own copy of this list).
+      auth      = new.env(parent = emptyenv())
+    )
+    class(conn) <- "EmsConnection"
+    authenticate(conn)
+    conn
+  }
+
+authenticate <-
+  function(conn)
+  {
+    cred <- get_credentials(conn)
     header <- c("Content-Type" = "application/x-www-form-urlencoded", "User-Agent" = user_agent)
     body <- list(grant_type = "password",
-                username   = usr,
-                password   = pwd)
+                 username   = cred$usr,
+                 password   = cred$pwd)
 
-    server <- match.arg(server, c('prod', 'cluster', 'stable', 'beta', 'nightly', 'ctc'), several.ok = FALSE)
-
-    sel_uri_root <- if (is.null(server_url)) uri_root[[server]] else server_url
-    uri = paste(sel_uri_root, uris$sys$auth, sep="")
-
-    if (is.null(proxies)) {
-      r <- httr::POST(uri,
-               httr::add_headers(.headers = header),
-               body = body,
-               encode = "form")
-    } else {
-      r <- httr::POST(uri,
-               use_proxy(proxies$url, port = proxies$port, username = proxies$usr, password = proxies$pwd),
-               httr::add_headers(.headers = header),
-               body = body,
-               encode = "form")
+    r <- httr::RETRY("POST", paste(conn$uri_root, uris$sys$auth, sep = ""),
+                     conn_config(conn),
+                     httr::add_headers(.headers = header),
+                     body = body,
+                     encode = "form",
+                     terminate_on = setdiff(400:499, 429),
+                     quiet = TRUE)
+    res <- parse_json(r)
+    if ( !is.null(res$message) ) {
+      print(paste("Message:", res$message))
     }
-    if ( !is.null(httr::content(r)$message) ) {
-      print(paste("Message:", httr::content(r)$message))
+    if ( httr::http_error(r) ) {
+      stop(paste("Message:", res$error_description))
     }
+    conn$auth$token      <- res$access_token
+    conn$auth$token_type <- res$token_type
+    invisible(conn)
+  }
 
-    if ( http_error(r)) {
-      stop(paste("Message:", httr::content(r)$error_description))
+get_credentials <-
+  function(conn)
+  {
+    if (is.null(conn$cred_key) || !exists(conn$cred_key, envir = .credentials, inherits = FALSE)) {
+      stop("Credentials for this connection are not available in this R session. Please call connect() again.")
     }
+    get(conn$cred_key, envir = .credentials, inherits = FALSE)
+  }
 
+# Proxy settings including the proxy password, which is only kept in the credential store.
+conn_proxies <-
+  function(conn)
+  {
+    if (!is.null(conn$cred_key) && exists(conn$cred_key, envir = .credentials, inherits = FALSE)) {
+      return(get(conn$cred_key, envir = .credentials, inherits = FALSE)$proxies)
+    }
+    conn$proxies
+  }
 
-    c <- list(
-      foqa      = list(usr=usr, pwd=pwd),
-      proxies   = proxies,
-      uri_root  = sel_uri_root,
-      token     = httr::content(r)$access_token,
-      token_type= httr::content(r)$token_type
-    )
-    c
+# httr config (timeouts, proxy, CA bundle) shared by every request on this connection.
+conn_config <-
+  function(conn)
+  {
+    # Abort when nothing arrives for stall_timeout seconds, rather than a fixed
+    # total timeout, so long but healthy downloads are not cut off.
+    stall <- if (is.null(conn$stall_timeout)) 300 else conn$stall_timeout
+    cfg <- httr::config(connecttimeout = 60, low_speed_limit = 1, low_speed_time = stall)
+    prx <- conn_proxies(conn)
+    if (length(prx) > 0) {
+      cfg <- c(cfg, httr::use_proxy(prx$url, port = prx$port, username = prx$usr, password = prx$pwd))
+    }
+    if (!is.null(conn$cainfo)) {
+      cfg <- c(cfg, httr::config(cainfo = conn$cainfo))
+    }
+    cfg
+  }
+
+auth_headers <-
+  function(conn)
+  {
+    c(Authorization = paste(conn$auth$token_type, conn$auth$token),
+      'User-Agent'  = user_agent)
+  }
+
+#' @export
+print.EmsConnection <-
+  function(x, ...)
+  {
+    cat("<EMS connection>\n")
+    cat("  Server: ", x$uri_root, "\n", sep = "")
+    if (length(x$proxies) > 0) cat("  Proxy:  ", x$proxies$url, "\n", sep = "")
+    cat("  Token:  ", if (is.null(x$auth$token)) "<none>" else "<hidden>", "\n", sep = "")
+    invisible(x)
   }
 
 #' Refresh Connection
 #'
 #' Refresh the connection object in case auth token expires.
 #'
-#' This function will re-use the stored connection credentials in the connection object to regenerate the authentication token.
+#' This function will re-use the connection credentials held for this R session to regenerate the authentication token.
+#' Requests made through this package already do this automatically when the token expires.
 #'
 #' @param conn A connection object created by the \code{connect} function.
 #' @return A refreshed connection object like the one returned by \code{connect}
@@ -98,8 +172,38 @@ connect <- function(usr, pwd, proxies = NULL, server = c('prod', 'cluster', 'sta
 reconnect <-
   function(conn)
   {
-    # server_name = names(uri_root[uri_root==conn$uri_root])
-    return(connect(conn$foqa$usr, conn$foqa$pwd, proxies = conn$proxies, server_url = conn$uri_root))
+    authenticate(conn)
+  }
+
+build_uri <-
+  function(conn, uri_keys, uri_args = NULL)
+  {
+    if (is.null(uri_keys)) {
+      stop("uri_keys must be given.")
+    }
+    uri <- paste(conn$uri_root, uris[[uri_keys[1]]][[uri_keys[2]]], sep = "")
+    if (!is.null(uri_args)) {
+      # percent encode the args
+      uri_args <- sapply(uri_args, function(x) if (is.na(suppressWarnings(as.numeric(x)))) URLencode(x, reserved = TRUE) else x)
+      uri      <- do.call(sprintf, as.list(c(uri, uri_args)))
+    }
+    uri
+  }
+
+# Parse a JSON response the same way httr::content() does (lists of lists), or with
+# simplify = TRUE turn arrays into vectors/matrices, which is much faster for row data.
+parse_json <-
+  function(r, simplify = FALSE)
+  {
+    txt <- if (inherits(r, "response")) httr::content(r, as = "text", encoding = "UTF-8") else r
+    if (is.null(txt) || !nzchar(txt)) {
+      return(NULL)
+    }
+    if (simplify) {
+      jsonlite::fromJSON(txt, simplifyVector = TRUE, simplifyDataFrame = FALSE, simplifyMatrix = TRUE)
+    } else {
+      jsonlite::fromJSON(txt, simplifyVector = FALSE)
+    }
   }
 
 #' Arbitrary Request
@@ -109,6 +213,9 @@ reconnect <-
 #' For advanced users only, this function allows you to perform an arbitrary GET, POST or DELETE
 #' request on the low-level API. Allows for full configurability of the request, including
 #' setting the keys, arguments, headers, and JSON payload.
+#'
+#' GET and DELETE requests are retried on network errors, 429 and 5xx responses. If the
+#' auth token has expired (401), it is refreshed and the request is sent once more.
 #'
 #' @param conn A connection object generated by \code{connect}
 #' @param rtype A string indicating the kind of HTTP request to be performed - accepts GET, POST and DELETE
@@ -123,85 +230,92 @@ reconnect <-
 #' @export
 request <-
   function(conn, rtype = c("GET","POST","DELETE"), uri_keys = NULL, uri_args = NULL,
-           headers = NULL, body = NULL, jsondata = NULL #, verbose = FALSE
+           headers = NULL, body = NULL, jsondata = NULL
            )
   {
+    rtype <- match.arg(rtype, c("GET","POST","DELETE"), several.ok = FALSE)
+    uri   <- build_uri(conn, uri_keys, uri_args)
+
     # Default encoding is "application/x-www-form-urlencoded"
     encoding <- "form"
-
-    # use proxy
-    if (!is.null(conn$proxies)) {
-      prxy <- use_proxy(conn$proxies$url,
-                        port      = conn$proxies$port,
-                        username  = conn$proxies$usr,
-                        password  = conn$proxies$pwd)
-    } else {
-      prxy = NULL
-    }
-
-    if (is.null(headers)) {
-      headers <- c(Authorization = paste(conn$token_type, conn$token),
-                   'Accept-Encoding' = 'gzip',
-                   'User-Agent' = user_agent)
-    }
-
-    if (!is.null(uri_keys)) {
-      uri <- paste(conn$uri_root,
-                   uris[[uri_keys[1]]][[uri_keys[2]]],
-                   sep = "")
-    }
-
-    if (!is.null(uri_args)) {
-      # percent encode the args
-      uri_args <- sapply(uri_args, function(x) if (is.na(suppressWarnings(as.numeric(x)))) URLencode(x, reserved = TRUE) else x)
-      uri      <- do.call(sprintf, as.list(c(uri, uri_args)))
-    }
-
     if (!is.null(jsondata)) {
       body <- jsondata
       encoding <- "json"
     }
 
-    rtype <- match.arg(rtype, c("GET","POST","DELETE"), several.ok = FALSE)
-
-    if (rtype=="GET") {
-      tryCatch({
-        r <- httr::GET(uri, prxy, query = body, httr::add_headers(.headers = headers), encode = encoding)
-      }, error = function(err) {
-        print(err)
-        cat(sprintf("Http status code %s: %s", httr::status_code(r), httr::content(r)))
-        cat("Trying to Reconnect EMS...")
-        conn = reconnect(conn)
-        r <- httr::GET(uri, prxy, query = body, httr::add_headers(.headers = headers), encode = encoding)
+    send <- function() {
+      hdrs <- if (is.null(headers)) c(auth_headers(conn), 'Accept-Encoding' = 'gzip') else headers
+      if (rtype == "POST") {
+        # POSTs are not retried automatically: some (e.g. database inserts) are not idempotent.
+        httr::POST(uri, conn_config(conn), body = body, httr::add_headers(.headers = hdrs), encode = encoding)
+      } else if (rtype == "GET") {
+        httr::RETRY("GET", uri, conn_config(conn), query = body, httr::add_headers(.headers = hdrs),
+                    encode = encoding, terminate_on = setdiff(400:499, 429), quiet = TRUE)
+      } else {
+        httr::RETRY("DELETE", uri, conn_config(conn), body = body, httr::add_headers(.headers = hdrs),
+                    encode = encoding, terminate_on = setdiff(400:499, 429), quiet = TRUE)
       }
+    }
 
-      )
-
-    } else if (rtype=="POST") {
-      tryCatch({
-        r <- httr::POST(uri, prxy, body = body, httr::add_headers(.headers = headers), encode = encoding)
-      }, error = function(err) {
-        print(err)
-        cat(sprintf("Http status code %s: %s", httr::status_code(r), httr::content(r)))
-        cat("Trying to Reconnect EMS...\n")
-        conn = reconnect(conn)
-        r <- httr::POST(uri, prxy, body = body, httr::add_headers(.headers = headers), encode = encoding)
-      })
-
-    } else if (rtype=="DELETE") {
-      tryCatch({
-        r <- DELETE(uri, prxy, body = body, httr::add_headers(.headers = headers), encode = encoding)
-      }, error = function(err) {
-        print(err)
-        cat(sprintf("Http status code %s: %s", httr::status_code(r), httr::content(r)))
-        cat("Trying to Reconnect EMS...\n")
-        conn = reconnect(conn)
-        r <- DELETE(uri, prxy, body = body, httr::add_headers(.headers = headers), encode = encoding)
-      })
-    } else {
-      stop(sprintf("%s: Unsupported request type.", rtype))
+    r <- send()
+    if (httr::status_code(r) == 401 && is.null(headers)) {
+      cat("Auth token expired. Reconnecting to EMS...\n")
+      reconnect(conn)
+      r <- send()
     }
     r
   }
 
+# Send several requests concurrently. Each element of `reqs` is a list with the
+# arguments of request(): rtype, uri_keys, uri_args, and optionally body (sent as a
+# query string) or jsondata. Returns, in order, a list of list(status, text) where a
+# network failure has status NA and the error message as text. Requests rejected
+# with 401 are sent once more after refreshing the token.
+request_parallel <-
+  function(conn, reqs, max_concurrent = 4, on_done = NULL)
+  {
+    out     <- vector("list", length(reqs))
+    pending <- seq_along(reqs)
+    for (attempt in 1:2) {
+      pool <- curl::new_pool(total_con = max_concurrent, host_con = max_concurrent)
+      opts <- c(conn_config(conn)$options, list(accept_encoding = "gzip"))
+      hdrs <- as.list(auth_headers(conn))
+      for (i in pending) {
+        local({
+          idx <- i
+          rq  <- reqs[[idx]]
+          url <- build_uri(conn, rq$uri_keys, rq$uri_args)
+          h   <- curl::new_handle()
+          curl::handle_setopt(h, .list = opts)
+          req_hdrs <- hdrs
+          if (!is.null(rq$jsondata)) {
+            # Same JSON encoding httr uses for encode = "json"
+            payload <- Filter(function(x) length(x) > 0, rq$jsondata)
+            curl::handle_setopt(h, customrequest = rq$rtype,
+                                postfields = as.character(jsonlite::toJSON(payload, auto_unbox = TRUE, digits = 22)))
+            req_hdrs[["Content-Type"]] <- "application/json"
+          } else {
+            if (!is.null(rq$body)) url <- httr::modify_url(url, query = rq$body)
+            if (!is.null(rq$rtype) && rq$rtype != "GET") curl::handle_setopt(h, customrequest = rq$rtype)
+          }
+          curl::handle_setheaders(h, .list = req_hdrs)
+          curl::curl_fetch_multi(url, handle = h, pool = pool,
+                                 done = function(res) {
+                                   out[[idx]] <<- list(status = res$status_code,
+                                                       text   = rawToChar(res$content))
+                                   if (!is.null(on_done) && res$status_code != 401) on_done(idx)
+                                 },
+                                 fail = function(msg) {
+                                   out[[idx]] <<- list(status = NA_integer_, text = msg)
+                                 })
+        })
+      }
+      curl::multi_run(pool = pool)
 
+      pending <- pending[vapply(out[pending], function(x) identical(x$status, 401L), logical(1))]
+      if (length(pending) == 0 || attempt == 2) break
+      cat("Auth token expired. Reconnecting to EMS...\n")
+      reconnect(conn)
+    }
+    out
+  }

@@ -4,3 +4,4 @@
 .Ruserdata
 temp/
 timeseries.db
+*.tar.gz

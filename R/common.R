@@ -9,7 +9,7 @@ uri_root <- list(
   ctc        = 'https://ems.cn.efoqa.com/api'
 )
 
-user_agent <- 'ems-api-sdk R v0.2'
+user_agent <- 'ems-api-sdk R v0.3'
 
 uris <- list(
   sys = list(

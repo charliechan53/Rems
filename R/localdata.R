@@ -9,13 +9,23 @@ localdata <-
                            params    = c('ems_id','id','name','description','units'))
 
     if (is.null(dbfile)) {
-      obj$dbfile <- file.path(path.package("Rems"),'data', 'emsMetaData.db')
+      obj$dbfile <- default_metadata_file()
     } else {
       obj$dbfile <- file.path(dbfile)
     }
     obj <- connect.LocalData(obj)
     obj
   }
+
+# Default cache location in the user's cache directory, not the package install folder.
+default_metadata_file <-
+  function()
+  {
+    cache_dir <- tools::R_user_dir("Rems", which = "cache")
+    dir.create(cache_dir, recursive = TRUE, showWarnings = FALSE)
+    file.path(cache_dir, "emsMetaData.db")
+  }
+
 #' @importFrom DBI dbConnect
 connect.LocalData <-
   function(ldat)
@@ -30,7 +40,7 @@ check_colnames <-
     colnames <- ldat$table_info[[table_name]]
     missing  <- setdiff(colnames, names(dat))
     if (length(missing) > 0) {
-      stop("Data misses the following columns that are required: %s", missing)
+      stop(sprintf("Data misses the following columns that are required: %s", paste(missing, collapse = ", ")))
     }
   }
 #' @importFrom DBI dbDisconnect
@@ -47,17 +57,18 @@ append_data <-
     check_colnames(ldat, table_name, dat)
     DBI::dbWriteTable(ldat$conn, table_name, dat, append = T, row.names = F)
   }
+# condition is a WHERE clause using ? placeholders, bound to the values in params.
 #' @importFrom DBI dbExistsTable
 #' @importFrom DBI dbGetQuery
 get_data <-
-  function(ldat, table_name, condition = NULL)
+  function(ldat, table_name, condition = NULL, params = NULL)
   {
     if (DBI::dbExistsTable(ldat$conn, table_name)) {
       q <- paste("SELECT * FROM", table_name)
       if (!is.null(condition)) {
         q <- paste(q, "WHERE", condition)
       }
-      dat <- DBI::dbGetQuery(ldat$conn, q)
+      dat <- DBI::dbGetQuery(ldat$conn, q, params = params)
       return (dat)
     }
     dat <- data.frame(matrix(NA,nrow=0, ncol=length(ldat$table_info[[table_name]])), stringsAsFactors = F)
@@ -67,13 +78,13 @@ get_data <-
 
 #' @importFrom DBI dbExecute
 delete_data <-
-  function(ldat, table_name, condition = NULL)
+  function(ldat, table_name, condition = NULL, params = NULL)
   {
     if (DBI::dbExistsTable(ldat$conn, table_name)) {
       if (is.null(condition)) {
         DBI::dbExecute(ldat$conn, paste("DROP TABLE", table_name))
       } else {
-        DBI::dbExecute(ldat$conn, paste("DELETE FROM", table_name, "WHERE", condition))
+        DBI::dbExecute(ldat$conn, paste("DELETE FROM", table_name, "WHERE", condition), params = params)
       }
     }
   }

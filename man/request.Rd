@@ -39,4 +39,7 @@ Perform an arbitrary GET, POST or DELETE function using a connection  object.
 For advanced users only, this function allows you to perform an arbitrary GET, POST or DELETE
 request on the low-level API. Allows for full configurability of the request, including
 setting the keys, arguments, headers, and JSON payload.
+
+GET and DELETE requests are retried on network errors, 429 and 5xx responses. If the
+auth token has expired (401), it is refreshed and the request is sent once more.
 }

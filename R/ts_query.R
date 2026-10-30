@@ -50,7 +50,7 @@ select.TsQuery <-
   {
     keywords <- list(...)
 
-    save_table = F
+    new_params <- data.frame()
     for ( kw in keywords ) {
       # Get the param from the param table
       prm <- get_param(qry$analytic, kw)
@@ -59,20 +59,23 @@ select.TsQuery <-
         # If param's not found, search from EMS API
         res <- search_param(qry$analytic, kw, flight_record = qry$fr)
 
-        df <- dplyr::bind_rows( res )
-
         #Drop both the 'Path' and 'displayPath' as they are list elements.
         #I don't believe they get used down-stream so easier to drop.
-        if( "path" %in% names( df ) ){
-          df <- dplyr::select( df, -path)
-        }
-        if( "displayPath" %in% names( df ) ){
-          df <- dplyr::select( df, -displayPath )
-        }
+        #This has to happen before bind_rows, which otherwise expands each
+        #param into one row per path element (or zero rows for an empty path).
+        res_flat <- lapply(res, function(x) x[setdiff(names(x), c("path", "displayPath"))])
+        df <- dplyr::bind_rows( res_flat )
 
-        qry$analytic$param_table <- rbind(qry$analytic$param_table, df)
+        # Only keep params the local table doesn't have yet
+        df <- df[!duplicated(df$id) & !(df$id %in% qry$analytic$param_table$id), , drop = FALSE]
+        if ( nrow(qry$analytic$param_table) == 0 ) {
+          # The empty table has untyped (logical) columns that bind_rows won't combine
+          qry$analytic$param_table <- as.data.frame(df)
+        } else {
+          qry$analytic$param_table <- dplyr::bind_rows(qry$analytic$param_table, df)
+        }
+        new_params <- dplyr::bind_rows(new_params, df)
         prm <- res[[1]]
-        save_table <- T
       }
       # Add the selected param into the query set
       n_sel <- length(qry$columns)
@@ -80,8 +83,8 @@ select.TsQuery <-
       # Just in case you need information of the selected params
       qry$columns[[n_sel+1]] <- prm
     }
-    if ( save_table) {
-      save_paramtable(qry$analytic)
+    if ( nrow(new_params) > 0 ) {
+      save_paramtable(qry$analytic, new_params)
     }
     return(qry)
   }
@@ -153,7 +156,24 @@ run.TsQuery <-
   )
 
   {
+    qry <- prepare_ts_queryset(qry, start, end, timestep, timepoint,
+                               sample_mode, offset_type, samplingRate)
 
+    r <- request(qry$connection, rtype="POST",
+                 uri_keys = c("analytic", "query"),
+                 uri_args = c(qry$ems_id, flight),
+                 jsondata = qry$queryset)
+    ts_result_to_df(qry, parse_json(r, simplify = TRUE), flight)
+  }
+
+prepare_ts_queryset <-
+  function(qry, start = NULL, end = NULL, timestep = NULL, timepoint = NULL,
+           sample_mode = c("leaveBlank", "uniquePreviousSample",
+                           "stairStep", "linearInterpolation",
+                           "parameterDefault", "previousSample"),
+           offset_type = c("sampledValues", "fixedRate"),
+           samplingRate = NULL)
+  {
     sample_mode <- match.arg(sample_mode,
                              c("leaveBlank", "uniquePreviousSample",
                                "stairStep", "linearInterpolation",
@@ -180,42 +200,39 @@ run.TsQuery <-
     } else {
       qry <- range(qry, start, end)
     }
+    qry
+  }
 
-    r <- request(qry$connection, rtype="POST",
-                 uri_keys = c("analytic", "query"),
-                 uri_args = c(qry$ems_id, flight),
-                 jsondata = qry$queryset)
-    res <- httr::content(r)
+# res is a response parsed with parse_json(..., simplify = TRUE), so offsets and
+# each parameter's values are already vectors with nulls as NA.
+ts_result_to_df <-
+  function(qry, res, flight)
+  {
     if ( !is.null(res$message) ) {
       stop(sprintf('API query for flight = %s was unsuccessful.\nHere is the massage from API: %s',
                    flight, res$message))
     }
 
-    df <- data.frame(unlist(res$offsets))
-    names(df) <- "Time (sec)"
-
-    for (i in seq_along(qry$columns)) {
-      # Unfortunately, httr's content function fills the emspty data as NULL in the list, instead of NA.
-      # This causes discrepancies in # of rows when there are nulls in the raw json data since unlist
-      # function simply ignore the list elements with NULL ending up returning a vector that is shorter
-      # then it should be.
-      prm_vals <- unlist(sapply(res$results[[i]]$values, function(x) if(is.null(x)) NA else x))
-      df <- cbind(df, prm_vals)
-      names(df)[i+1] <- qry$columns[[i]]$name
-    }
-    return(df)
+    vals <- lapply(seq_along(qry$columns), function(i) {
+      v <- res$results[[i]]$values
+      if (is.list(v)) unlist(lapply(v, function(x) if (is.null(x)) NA else x)) else v
+    })
+    df <- data.frame(c(list(unlist(res$offsets)), vals), stringsAsFactors = F)
+    names(df) <- c("Time (sec)", vapply(qry$columns, function(c) c$name, character(1)))
+    df
   }
 
+# Flights are queried concurrently, up to max_concurrent requests at a time.
 #' @export
 run_multiflts <-
-  function(qry, flight, start = NULL, end = NULL, timestep = NULL, timepoint = NULL)
+  function(qry, flight, start = NULL, end = NULL, timestep = NULL, timepoint = NULL, max_concurrent = 4)
   {
 
     # input argument "flight" as multi-column data
     res <- list()
 
     attr_flag <- F
-    if ( class(flight) == "data.frame" ) {
+    if ( is.data.frame(flight) ) {
       FR <- flight[ , "Flight Record"]
       attr_flag <- T
     } else {
@@ -228,15 +245,31 @@ run_multiflts <-
     }
 
     cat(sprintf("=== Start running time series data querying for %d flights ===\n", length(FR)))
-    for (i in 1:length(FR)) {
-      cat(sprintf("%d / %d: FR %d\n", i, length(FR), FR[i]))
+    reqs <- lapply(seq_along(FR), function(i) {
+      q <- prepare_ts_queryset(qry, start = start[i], end = end[i], timestep = timestep[i])
+      list(rtype    = "POST",
+           uri_keys = c("analytic", "query"),
+           uri_args = c(qry$ems_id, FR[i]),
+           jsondata = q$queryset)
+    })
+    n_done <- 0
+    resps <- request_parallel(qry$connection, reqs, max_concurrent,
+                              on_done = function(i) {
+                                n_done <<- n_done + 1
+                                cat(sprintf("%d / %d: FR %d\n", n_done, length(FR), FR[i]))
+                              })
+
+    for (i in seq_along(FR)) {
+      if (is.na(resps[[i]]$status)) {
+        stop(sprintf("API query for flight = %s failed: %s", FR[i], resps[[i]]$text))
+      }
       res[[i]] <- list()
       if ( attr_flag ) {
         res[[i]]$flt_data <- as.list(flight[i, ])
       } else {
         res[[i]]$flt_data <- list("Flight Record" = FR[i])
       }
-      res[[i]]$ts_data <- run.TsQuery(qry, FR[i], start = start[i], end = end[i], timestep = timestep[i])
+      res[[i]]$ts_data <- ts_result_to_df(qry, parse_json(resps[[i]]$text, simplify = TRUE), FR[i])
     }
     return(res)
   }

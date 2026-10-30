@@ -59,7 +59,7 @@ get_fieldtree <-
       names(dat) <- cols
       return(dat)
     } else {
-      dat <- get_data(flt$metadata, 'fieldtree',sprintf("ems_id = %d and db_id = '%s'", flt$ems_id, flt$db_id))
+      dat <- get_data(flt$metadata, 'fieldtree', "ems_id = ? and db_id = ?", list(flt$ems_id, flt$db_id))
       return(dat)
     }
   }
@@ -69,7 +69,7 @@ save_fieldtree <-
   function(flt)
   {
     if (nrow(flt$trees$fieldtree) > 0) {
-      delete_data(flt$metadata, 'fieldtree', sprintf("ems_id = %d and db_id = '%s'", flt$ems_id, flt$db_id))
+      delete_data(flt$metadata, 'fieldtree', "ems_id = ? and db_id = ?", list(flt$ems_id, flt$db_id))
       append_data(flt$metadata, 'fieldtree', flt$trees$fieldtree)
     }
   }
@@ -77,7 +77,7 @@ save_fieldtree <-
 get_dbtree <-
   function(flt)
   {
-    tr <- get_data(flt$metadata, 'dbtree', paste("ems_id =", flt$ems_id))
+    tr <- get_data(flt$metadata, 'dbtree', "ems_id = ?", list(flt$ems_id))
     if (nrow(tr) < 1) {
       dbroot <- list(ems_id = flt$ems_id,
                      id     = "[-hub-][entity-type-group][[--][internal-type-group][root]]",
@@ -98,7 +98,7 @@ save_dbtree <-
   function(flt)
   {
     if (nrow(flt$trees$dbtree) > 0) {
-      delete_data(flt$metadata, 'dbtree', sprintf("ems_id = %d", flt$ems_id))
+      delete_data(flt$metadata, 'dbtree', "ems_id = ?", list(flt$ems_id))
       append_data(flt$metadata, 'dbtree', flt$trees$dbtree)
     }
   }
@@ -106,7 +106,7 @@ save_dbtree <-
 get_kvmaps <-
   function(flt)
   {
-    get_data(flt$metadata, 'kvmaps', paste("ems_id =", flt$ems_id))
+    get_data(flt$metadata, 'kvmaps', "ems_id = ?", list(flt$ems_id))
   }
 
 
@@ -114,7 +114,7 @@ save_kvmaps <-
   function(flt)
   {
     if (nrow(flt$trees$kvmaps) > 0) {
-      delete_data(flt$metadata, 'kvmaps', sprintf("ems_id = %d", flt$ems_id))
+      delete_data(flt$metadata, 'kvmaps', "ems_id = ?", list(flt$ems_id))
       append_data(flt$metadata, 'kvmaps', flt$trees$kvmaps)
     }
   }
@@ -164,103 +164,115 @@ get_database.Flight <-
   }
 
 
-db_request <-
-  function(flt, parent)
+tree_request_spec <-
+  function(flt, parent, treetype = c('fieldtree', 'dbtree'))
   {
-    body <- NULL
-    if (parent$nodetype=="database_group") {
-      body <- list('groupId' = parent$id)
-    }
-    r    <- request(flt$connection,
-                    uri_keys = c('database','group'),
-                    uri_args = flt$ems_id,
-                    body = body)
-    ##  Get the children fields/field groups
-    d <- httr::content(r)
-
-    d1 <- list()
-    if (length(d$databases) > 0) {
-      d1 <- lapply(d$databases, function(x) list(ems_id    = parent$ems_id,
-                                                  id        = x$id,
-                                                  nodetype  = 'database',
-                                                  name      = x$pluralName,
-                                                  parent_id = parent$id))
-    }
-    d2 <- list()
-    if (length(d$groups) > 0) {
-      d2 <- lapply(d$groups, function(x) list(ems_id    = parent$ems_id,
-                                              id        = x$id,
-                                              nodetype  = 'database_group',
-                                              name      = x$name,
-                                              parent_id = parent$id))
-    }
-    return(list(d1=d1, d2=d2))
-  }
-
-
-fl_request <-
-  function(flt, parent)
-  {
-    body <- NULL
-    if (parent$nodetype=="field_group") {
-      body <- list('groupId' = parent$id)
-    }
-    r    <- request(flt$connection,
-                    uri_keys = c('database','field_group'),
-                    uri_args = c(flt$ems_id, flt$db_id),
-                    body = body)
-    ##  Get the children fields/field groups
-    d <- httr::content(r)
-
-    d1 <- list()
-    if (length(d$fields) > 0) {
-      d1 <- lapply(d$fields, function(x) list(ems_id    = parent$ems_id,
-                                              db_id     = flt$db_id,
-                                               id        = x$id,
-                                               nodetype  = 'field',
-                                               type      = x$type,
-                                               name      = x$name,
-                                               parent_id = parent$id))
-    }
-    d2 <- list()
-    if (length(d$groups) > 0) {
-      d2 <- lapply(d$groups, function(x) list(ems_id    = parent$ems_id,
-                                              db_id     = flt$db_id,
-                                              id        = x$id,
-                                              nodetype  = 'field_group',
-                                              type      = '',
-                                              name      = x$name,
-                                              parent_id = parent$id))
-    }
-    return(list(d1=d1, d2=d2))
-  }
-
-
-add_subtree <-
-  function(flt, parent, exclude_tree = c(), treetype = c('fieldtree', 'dbtree')) {
-
-    cat(sprintf("On %s (%s)...\n", parent$name, parent$nodetype))
-
     if (treetype == 'dbtree') {
-      searchtype <- 'database'
-      res <- db_request(flt, parent)
+      body <- if (parent$nodetype == "database_group") list('groupId' = parent$id) else NULL
+      list(rtype = "GET", uri_keys = c('database','group'), uri_args = flt$ems_id, body = body)
     } else {
-      searchtype <- 'field'
-      res <- fl_request(flt, parent)
+      body <- if (parent$nodetype == "field_group") list('groupId' = parent$id) else NULL
+      list(rtype = "GET", uri_keys = c('database','field_group'), uri_args = c(flt$ems_id, flt$db_id), body = body)
     }
-
-    if (length(res$d1) > 0) {
-      flt$trees[[treetype]] <- rbind(flt$trees[[treetype]], lls_to_df(res$d1), stringsAsFactors=F)
-      plural <- if (length(res$d1) > 1) "s" else ""
-      cat(sprintf("-- Added %d %s%s\n", length(res$d1), searchtype, plural))
-    }
+  }
 
 
-    for (x in res$d2) {
-      flt$trees[[treetype]] <- rbind(flt$trees[[treetype]], x, stringsAsFactors=F)
-      if ( (length(exclude_tree) == 0) || (all(sapply(exclude_tree, function(et) !grepl(et, x$name)))) ) {
-        flt <- add_subtree(flt, x, exclude_tree, treetype)
+parse_tree_response <-
+  function(flt, parent, d, treetype = c('fieldtree', 'dbtree'))
+  {
+    d1 <- list()
+    d2 <- list()
+    if (treetype == 'dbtree') {
+      if (length(d$databases) > 0) {
+        d1 <- lapply(d$databases, function(x) list(ems_id    = parent$ems_id,
+                                                    id        = x$id,
+                                                    nodetype  = 'database',
+                                                    name      = x$pluralName,
+                                                    parent_id = parent$id))
       }
+      if (length(d$groups) > 0) {
+        d2 <- lapply(d$groups, function(x) list(ems_id    = parent$ems_id,
+                                                id        = x$id,
+                                                nodetype  = 'database_group',
+                                                name      = x$name,
+                                                parent_id = parent$id))
+      }
+    } else {
+      if (length(d$fields) > 0) {
+        d1 <- lapply(d$fields, function(x) list(ems_id    = parent$ems_id,
+                                                db_id     = flt$db_id,
+                                                id        = x$id,
+                                                nodetype  = 'field',
+                                                type      = x$type,
+                                                name      = x$name,
+                                                parent_id = parent$id))
+      }
+      if (length(d$groups) > 0) {
+        d2 <- lapply(d$groups, function(x) list(ems_id    = parent$ems_id,
+                                                db_id     = flt$db_id,
+                                                id        = x$id,
+                                                nodetype  = 'field_group',
+                                                type      = '',
+                                                name      = x$name,
+                                                parent_id = parent$id))
+      }
+    }
+    list(d1 = d1, d2 = d2)
+  }
+
+
+tree_request <-
+  function(flt, parent, treetype = c('fieldtree', 'dbtree'))
+  {
+    rq <- tree_request_spec(flt, parent, treetype)
+    r  <- request(flt$connection, uri_keys = rq$uri_keys, uri_args = rq$uri_args, body = rq$body)
+    parse_tree_response(flt, parent, parse_json(r), treetype)
+  }
+
+
+db_request <- function(flt, parent) tree_request(flt, parent, 'dbtree')
+
+
+fl_request <- function(flt, parent) tree_request(flt, parent, 'fieldtree')
+
+
+# Walks the tree level by level, fetching all groups of a level concurrently.
+add_subtree <-
+  function(flt, parent, exclude_tree = c(), treetype = c('fieldtree', 'dbtree'), max_concurrent = 4) {
+
+    searchtype <- if (treetype == 'dbtree') 'database' else 'field'
+    new_rows <- list()
+    level    <- list(parent)
+
+    while (length(level) > 0) {
+      for (p in level) cat(sprintf("On %s (%s)...\n", p$name, p$nodetype))
+      resps <- request_parallel(flt$connection,
+                                lapply(level, function(p) tree_request_spec(flt, p, treetype)),
+                                max_concurrent)
+      next_level <- list()
+      for (k in seq_along(level)) {
+        if (is.na(resps[[k]]$status) || resps[[k]]$status >= 400) {
+          stop(sprintf("Failed to get the children of '%s': %s", level[[k]]$name, resps[[k]]$text))
+        }
+        res <- parse_tree_response(flt, level[[k]], parse_json(resps[[k]]$text), treetype)
+
+        if (length(res$d1) > 0) {
+          new_rows <- c(new_rows, res$d1)
+          plural <- if (length(res$d1) > 1) "s" else ""
+          cat(sprintf("-- Added %d %s%s\n", length(res$d1), searchtype, plural))
+        }
+        for (x in res$d2) {
+          new_rows[[length(new_rows) + 1]] <- x
+          if ( (length(exclude_tree) == 0) || (all(sapply(exclude_tree, function(et) !grepl(et, x$name)))) ) {
+            next_level[[length(next_level) + 1]] <- x
+          }
+        }
+      }
+      level <- next_level
+    }
+
+    if (length(new_rows) > 0) {
+      flt$trees[[treetype]] <- rbind(flt$trees[[treetype]], lls_to_df(new_rows), stringsAsFactors=F)
     }
     flt
   }
@@ -444,9 +456,8 @@ list_allvalues <-
       fld_name <- subset(flt$trees$fieldtree, id==fld_id)$name
     }
 
-    flt$trees$kvmaps <- get_kvmaps(flt)
-    tr <- flt$trees$kvmaps
-    kmap <- subset(tr, (ems_id==flt$ems_id) & (id==fld_id))
+    # Only load the mappings of this field, not the whole kvmaps table
+    kmap <- get_data(flt$metadata, 'kvmaps', "ems_id = ? and id = ?", list(flt$ems_id, fld_id))
 
     if (nrow(kmap)==0) {
       cat(sprintf("%s: Getting key-value mappings from API. (Caution: Some fields take a very long time)\n", fld_name))
@@ -459,7 +470,7 @@ list_allvalues <-
                          key   =as.integer(names(km)),
                          value =unlist(km, use.names = F), stringsAsFactors=F)
       flt$trees$kvmaps <- rbind(flt$trees$kvmaps, kmap)
-      save_kvmaps(flt)
+      append_data(flt$metadata, 'kvmaps', kmap)
     }
     if (in_vec) {
       aa <- kmap[,'value']
@@ -495,7 +506,7 @@ get_value_id <-
 get_shortest <-
   function(fields)
   {
-    if (class(fields)!="data.frame") {
+    if (!is.data.frame(fields)) {
       stop("Input should be a data frame")
     }
     as.list(fields[order(nchar(fields$name))[1], ])
@@ -517,12 +528,5 @@ treat_spchar <-
 lls_to_df <-
   function(lls)
   {
-    for (i in 1:length(lls)) {
-      if (i==1) {
-        dat <- data.frame(lls[[i]], stringsAsFactors = F)
-      } else {
-        dat <- rbind(dat, lls[[i]])
-      }
-    }
-    dat
+    as.data.frame(dplyr::bind_rows(lls), stringsAsFactors = F)
   }

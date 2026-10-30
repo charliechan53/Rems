@@ -18,23 +18,24 @@ load_paramtable <-
     if (is.null(anal$metadata)) {
       anal$metadata <- localdata(data_file)
     } else {
-      if ((!is.null(data_file)) && (file_loc(anal$metadata) != file.path(file_name))) {
+      if ((!is.null(data_file)) && (file_loc(anal$metadata) != file.path(data_file))) {
         close.LocalData(anal$metadata)
         anal$metadata <- localdata(data_file)
       }
     }
-    anal$param_table = get_data(anal$metadata, "params", sprintf("ems_id = %d", anal$ems_id))
+    anal$param_table = get_data(anal$metadata, "params", "ems_id = ?", list(anal$ems_id))
 
     return(anal)
   }
 
 
+# Appends only the newly found params instead of rewriting the whole table.
 save_paramtable <-
-  function(anal, data_file = NULL)
+  function(anal, new_params)
   {
-    if (nrow(anal$param_table) > 0) {
-      delete_data(anal$metadata, 'params', sprintf("ems_id = %d", anal$ems_id))
-      append_data(anal$metadata, 'params', anal$param_table)
+    if (nrow(new_params) > 0) {
+      cols <- intersect(names(new_params), anal$metadata$table_info$params)
+      append_data(anal$metadata, 'params', new_params[, cols, drop = FALSE])
     }
   }
 

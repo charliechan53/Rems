@@ -22,13 +22,12 @@
 #' @export
 flt_query <- function(conn, ems_name, data_file) {
 
-    ems_name <- match.arg(ems_name, retrieve_ems_instances(conn), several.ok = FALSE)
-
     obj <- list()
     class(obj) <- 'FltQuery'
     # Instantiating other objects
     obj$connection <- conn
     obj$ems        <- ems(conn)
+    ems_name       <- match.arg(ems_name, obj$ems$list$name, several.ok = FALSE)
     obj$ems_id     <- get_id(obj$ems, ems_name)
     obj$flight     <- flight(conn, obj$ems_id, data_file)
 

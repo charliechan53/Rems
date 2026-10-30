@@ -1,20 +1,22 @@
 Package: Rems
 Type: Package
 Title: R EMS API Wrapper
-Version: 0.2.0
+Version: 0.3.0
 Authors@R: person("Kyungjin", "Moon", email = "kyungjin.moon@ge.com", role = c("aut", "cre"))
 Description: The package is a wrapper of the RESTful API to ADI's EMS Data
     System.
 License: MIT License
 LazyData: TRUE
 Depends:
-    R (>= 3.2.3),
-    DBI (>= 0.5),
-    RSQLite (>= 1.1),
-    httr (>= 1.1.0),
-    jsonlite (>= 0.9.21)
+    R (>= 4.0.0),
+    DBI (>= 1.1.0),
+    RSQLite (>= 3.53.2),
+    httr (>= 1.4.7),
+    jsonlite (>= 1.8.0)
 RoxygenNote: 7.3.1
 Encoding: UTF-8
 Imports: 
-    dplyr,
-    stringdist
+    curl (>= 5.0.0),
+    dplyr (>= 1.1.0),
+    stringdist,
+    tools

@@ -67,20 +67,9 @@ to_dataframe <-
     coltype <- sapply(qry$columns, function(c) c$type)
     col_id  <- sapply(qry$columns, function(c) c$id)
 
-    # JSON raw data to dataframe. Each data element is a string. It will
-    # need to be converted to a right type.
-    ldata <- lapply(raw_out$rows,
-                    function(r) {
-                      sapply(r, function(rr) ifelse(is.null(rr), NA, rr))
-                    })
-
-    # df <- data.frame(matrix(NA, nrow=length(raw_out$rows), ncol=length(colname)),
-    #                  stringsAsFactors = F)
-    # names(df) <- colname
-    # for ( i in 1:nrow(df) ) {
-    #   df[i, ] <- ldata[[i]]
-    # }
-    df <- data.frame(do.call(rbind, ldata), stringsAsFactors = F)
+    # raw_out$rows is the row matrix produced by parse_json(..., simplify = TRUE),
+    # with nulls as NA. Each column will need to be converted to a right type.
+    df <- data.frame(raw_out$rows, stringsAsFactors = F)
     names(df) <- colname
 
     if ( qry$queryset$format == 'display') {
@@ -96,24 +85,29 @@ to_dataframe <-
                                format = "%Y-%m-%dT%H:%M:%S")
       } else if ( coltype[i] == "discrete" ) {
         k_map <- list_allvalues(qry$flight, field_id = col_id[i], in_vec = T)
-        # Sometimes k_map is a very large table making "replace" operation
-        # very slow. Just grap kv-maps subset that are present in the target
-        # dataframe
-        k_map <- k_map[names(k_map) %in% unique(df[ , i])]
-        df[ , i] <- sapply(as.character(df[ , i]), function(k) k_map[k])
-        # == Old code ==
-        # if ( length(k_map) == 0 ) {
-        #   df[ , i] <- get_rwy_id(qry, i)
-        # } else {
-        #   df[ , i] <- sapply(as.character(df[ , i]), function(k) k_map[k])
-        # }
+        # Keys are integers; going through as.integer avoids "1e+05"-style strings.
+        keys <- as.character(suppressWarnings(as.integer(df[ , i])))
+        df[ , i] <- unname(k_map[keys])
       } else if ( coltype[i] == "boolean") {
-        df[ , i] <- as.logical(as.integer(df[ , i]))
+        df[ , i] <- as_boolean(df[ , i])
       }
     }
 
     cat("Done.\n")
     return(df)
+  }
+
+# Booleans may arrive as 0/1 or as "TRUE"/"FALSE" depending on how the page parsed.
+as_boolean <-
+  function(x)
+  {
+    if (!is.character(x)) {
+      return(as.logical(x))
+    }
+    out <- as.logical(x)
+    num <- suppressWarnings(as.integer(x))
+    out[!is.na(num)] <- as.logical(num[!is.na(num)])
+    out
   }
 
 get_rwy_id <-

@@ -16,7 +16,8 @@ A refreshed connection object like the one returned by \code{connect}
 Refresh the connection object in case auth token expires.
 }
 \details{
-This function will re-use the stored connection credentials in the connection object to regenerate the authentication token.
+This function will re-use the connection credentials held for this R session to regenerate the authentication token.
+Requests made through this package already do this automatically when the token expires.
 }
 \examples{
 \dontrun{

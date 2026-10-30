@@ -9,7 +9,9 @@ connect(
   pwd,
   proxies = NULL,
   server = c("prod", "cluster", "stable", "beta", "nightly", "ctc"),
-  server_url = NULL
+  server_url = NULL,
+  cainfo = NULL,
+  stall_timeout = 300
 )
 }
 \arguments{
@@ -22,6 +24,11 @@ connect(
 \item{server}{A string. Lets you choose an API server. Should be one of 'prod', 'cluster', 'stable', 'beta', 'nightly', or 'ctc'.}
 
 \item{server_url}{An optional string. If this is passed, it will be used instead of the internal server definitions matched by the 'server' argument.}
+
+\item{cainfo}{An optional path to a CA certificate bundle (PEM) used to verify the server certificate.}
+
+\item{stall_timeout}{Seconds a request may go without receiving any data before it is aborted
+(and retried, for GET/DELETE). Without this a dropped connection can hang forever.}
 }
 \value{
 a Connection object to be used in FltQuery.
@@ -35,6 +42,13 @@ These can be passed into a \code{fltquery} or \code{tsquery} function to start t
 These functions take unmasked usernames and passwords - it is recommended that you either store your credentials
 securely, or wrap this function in something like \code{rstudioapi::askForPassword()} to avoid disclosing
 your credentials.
+
+The password is held in memory for the current R session only (so the token can be refreshed when it
+expires); it is not stored in the returned object. A connection object restored from disk in a new
+session therefore cannot reconnect - call \code{connect} again.
+
+TLS certificates are always verified. If you are behind a proxy that re-signs traffic with a corporate
+certificate, pass that CA bundle via \code{cainfo} (or set the \code{CURL_CA_BUNDLE} environment variable).
 }
 \examples{
 # connect in a standard way, using no proxy and connecting to prod by default.
